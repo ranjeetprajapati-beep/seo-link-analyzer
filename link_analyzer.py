@@ -3,341 +3,217 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import pandas as pd
-import tldextract
-from concurrent.futures import ThreadPoolExecutor
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="SEO Link Analyzer", layout="wide")
+st.set_page_config(layout="wide")
 
-# Browser headers (fix false broken links)
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-}
+st.title("🚀 Enterprise SEO Link Analyzer")
 
-session = requests.Session()
-session.headers.update(headers)
+url = st.text_input("Enter URL")
 
-# -----------------------------
-# Custom UI Styling
-# -----------------------------
-st.markdown("""
-<style>
+# ---------------- SESSION ----------------
+if "df" not in st.session_state:
+    st.session_state.df = None
 
-body {
-background-color:#f4f7fc;
-}
-
-.title {
-font-size:40px;
-font-weight:800;
-color:#1f4e79;
-}
-
-.metric-card {
-background: linear-gradient(135deg,#4facfe,#00f2fe);
-padding:20px;
-border-radius:12px;
-text-align:center;
-color:white;
-box-shadow:0 6px 15px rgba(0,0,0,0.2);
-}
-
-.metric-number{
-font-size:32px;
-font-weight:700;
-}
-
-</style>
-""", unsafe_allow_html=True)
-
-
-# -----------------------------
-# Link Status Checker
-# -----------------------------
-def check_status(url):
-
+# ---------------- STATUS CHECK ----------------
+def check_status_fast(link):
     try:
-
-        r = session.get(url, allow_redirects=True, timeout=10)
-
-        status = r.status_code
-
-        if status == 404:
-            return "Broken"
-
-        elif status in [301,302]:
-            return "Redirect"
-
-        elif status >= 500:
-            return "Server Error"
-
-        elif status == 403:
-            return "Blocked"
-
-        else:
-            return "OK"
-
+        r = requests.head(link, timeout=3, allow_redirects=True)
+        return "OK" if r.status_code < 400 else "Broken"
     except:
         return "Broken"
 
+# ---------------- FETCH LINKS ----------------
+def fetch_links_fast(url):
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-# -----------------------------
-# Analyze Page
-# -----------------------------
-def analyze_page(url):
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
+    except:
+        return pd.DataFrame()
 
-    r = session.get(url)
+    links = []
+    domain = urlparse(url).netloc
+    anchors = soup.find_all("a", href=True)
 
-    soup = BeautifulSoup(r.text,"html.parser")
+    progress = st.progress(0)
+    status_text = st.empty()
 
-    links = soup.find_all("a",href=True)
+    total_links = len(anchors)
 
-    data=[]
+    for i, a in enumerate(anchors):
 
-    domain = tldextract.extract(url).registered_domain
+        href = urljoin(url, a["href"]).split("#")[0]
+        anchor = a.text.strip() or "N/A"
 
-    urls=[]
-    anchors=[]
-    types=[]
+        link_type = "Internal" if urlparse(href).netloc == domain else "External"
 
-    for a in links:
+        status = check_status_fast(href) if i < 40 else "OK"
 
-        href = a["href"]
-        anchor = a.get_text(strip=True)
-
-        full_url = urljoin(url,href)
-
-        link_domain = tldextract.extract(full_url).registered_domain
-
-        link_type = "Internal" if domain == link_domain else "External"
-
-        urls.append(full_url)
-        anchors.append(anchor)
-        types.append(link_type)
-
-    # Faster link checking
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        statuses=list(executor.map(check_status,urls))
-
-    for i in range(len(urls)):
-
-        data.append({
-
-            "Anchor Text":anchors[i],
-            "URL":urls[i],
-            "Type":types[i],
-            "Status":statuses[i]
-
+        links.append({
+            "Anchor Text": anchor,
+            "URL": href,
+            "Type": link_type,
+            "Status": status
         })
 
-    df=pd.DataFrame(data)
+        progress.progress((i + 1) / total_links)
+        status_text.text(f"🔍 Analyzing {i+1}/{total_links} links...")
 
-    return df
+    status_text.text("✅ Analysis Completed")
 
+    return pd.DataFrame(links)
 
-# -----------------------------
-# Crawl Website
-# -----------------------------
-def crawl_site(start_url,max_pages=20):
+# ---------------- INTERNAL LINK DISCOVERY ----------------
+def find_linking_pages_pro(base_url, target, limit=30):
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-    visited=set()
-    to_visit=[start_url]
+    try:
+        r = requests.get(base_url, headers=headers, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
 
-    domain=urlparse(start_url).netloc
+        domain = urlparse(base_url).netloc
 
-    pages=[]
+        internal_links = set()
 
-    while to_visit and len(visited)<max_pages:
+        for a in soup.find_all("a", href=True):
+            link = urljoin(base_url, a["href"]).split("#")[0]
+            if urlparse(link).netloc == domain:
+                internal_links.add(link)
 
-        url=to_visit.pop(0)
+        results = []
+        pages = list(internal_links)[:limit]
 
-        if url in visited:
-            continue
+        prog = st.progress(0)
+        txt = st.empty()
 
-        visited.add(url)
-        pages.append(url)
+        for i, page in enumerate(pages):
 
-        try:
+            txt.text(f"🔍 Scanning {i+1}/{len(pages)} pages...")
 
-            r=session.get(url)
+            try:
+                r = requests.get(page, timeout=5)
+                soup = BeautifulSoup(r.text, "html.parser")
 
-            soup=BeautifulSoup(r.text,"html.parser")
+                for a in soup.find_all("a", href=True):
+                    href = urljoin(page, a["href"]).split("#")[0]
+                    anchor = a.text.strip() or "N/A"
 
-            for a in soup.find_all("a",href=True):
+                    # remove self-links
+                    if href == page:
+                        continue
 
-                link=urljoin(url,a["href"])
+                    if href == target.split("#")[0]:
+                        results.append({
+                            "Page Linking To Target": page,
+                            "Anchor Text": anchor
+                        })
 
-                if domain in urlparse(link).netloc and link not in visited:
+            except:
+                continue
 
-                    to_visit.append(link)
+            prog.progress((i + 1) / len(pages))
 
-        except:
-            continue
+        txt.text("✅ Link discovery completed")
 
-    return pages
+        return pd.DataFrame(results)
 
+    except:
+        return pd.DataFrame()
 
-# -----------------------------
-# Find Interlinks
-# -----------------------------
-def find_interlinks(target_url,pages):
+# ---------------- RUN ----------------
+if st.button("Run Analysis"):
 
-    results=[]
+    df = fetch_links_fast(url)
+    st.session_state.df = df
 
-    for page in pages:
-
-        try:
-
-            r=session.get(page)
-
-            soup=BeautifulSoup(r.text,"html.parser")
-
-            for a in soup.find_all("a",href=True):
-
-                link=urljoin(page,a["href"])
-
-                if link==target_url:
-
-                    results.append({
-
-                        "Page Linking To Target":page,
-                        "Anchor Text":a.get_text(strip=True)
-
-                    })
-
-        except:
-            continue
-
-    return pd.DataFrame(results)
-
-
-# -----------------------------
-# UI
-# -----------------------------
-st.markdown('<p class="title">🚀 SEO Link Analyzer + Internal Link Finder</p>', unsafe_allow_html=True)
-
-url = st.text_input("Enter Page URL")
-
-
-if st.button("Analyze Page"):
-
-    st.session_state.df = analyze_page(url)
-
-if "df" in st.session_state:
+# ---------------- DISPLAY ----------------
+if st.session_state.df is not None:
 
     df = st.session_state.df
 
-    total_links = len(df)
-    internal_links = len(df[df["Type"]=="Internal"])
-    external_links = len(df[df["Type"]=="External"])
-    broken_links = len(df[df["Status"]=="Broken"])
-    redirects = len(df[df["Status"]=="Redirect"])
-
-
-    st.subheader("Summary")
-
-    col1,col2,col3,col4,col5 = st.columns(5)
-
-    col1.markdown(f"<div class='metric-card'>Total Links<br><span class='metric-number'>{total_links}</span></div>", unsafe_allow_html=True)
-
-    col2.markdown(f"<div class='metric-card'>Internal Links<br><span class='metric-number'>{internal_links}</span></div>", unsafe_allow_html=True)
-
-    col3.markdown(f"<div class='metric-card'>External Links<br><span class='metric-number'>{external_links}</span></div>", unsafe_allow_html=True)
-
-    col4.markdown(f"<div class='metric-card'>Broken Links<br><span class='metric-number'>{broken_links}</span></div>", unsafe_allow_html=True)
-
-    col5.markdown(f"<div class='metric-card'>Redirects<br><span class='metric-number'>{redirects}</span></div>", unsafe_allow_html=True)
-
-
-    # -----------------------------
-    # Chart
-    # -----------------------------
-    chart_data=pd.DataFrame({
-
-        "Type":["Internal","External","Broken","Redirect"],
-        "Count":[internal_links,external_links,broken_links,redirects]
-
-    })
-
-    st.subheader("Link Distribution")
-
-    st.bar_chart(chart_data.set_index("Type"))
-
-
-    # -----------------------------
-    # Filter Links
-    # -----------------------------
-    option=st.selectbox(
-
-        "Filter Links",
-
-        [
-            "All Links",
-            "Internal Links",
-            "External Links",
-            "Broken Links",
-            "Redirects"
-        ]
-
-    )
-
-    filtered=df
-
-    if option=="Internal Links":
-        filtered=df[df["Type"]=="Internal"]
-
-    elif option=="External Links":
-        filtered=df[df["Type"]=="External"]
-
-    elif option=="Broken Links":
-        filtered=df[df["Status"]=="Broken"]
-
-    elif option=="Redirects":
-        filtered=df[df["Status"]=="Redirect"]
-
-
-    st.subheader("Link Report")
-
-    st.dataframe(filtered, use_container_width=True)
-
-
-    # -----------------------------
-    # CSV Download
-    # -----------------------------
-    csv = df.to_csv(index=False).encode("utf-8")
-
-    st.download_button(
-        "Download CSV",
-        csv,
-        "link_report.csv",
-        "text/csv"
-    )
-
-
-    # -----------------------------
-    # Interlink Finder
-    # -----------------------------
-    st.subheader("Find Pages Linking To This URL")
-
-    with st.spinner("Searching internal links..."):
-
-        pages=crawl_site(url)
-
-        interlinks=find_interlinks(url,pages)
-
-    if not interlinks.empty:
-
-        st.dataframe(interlinks, use_container_width=True)
-
-        st.download_button(
-
-            "Download Interlink Report",
-
-            interlinks.to_csv(index=False),
-
-            "interlink_report.csv"
-
-        )
-
+    if df.empty:
+        st.error("❌ Failed to fetch links")
     else:
 
-        st.info("No pages found linking to this URL.")
+        # -------- SUMMARY --------
+        total = len(df)
+        internal = len(df[df["Type"] == "Internal"])
+        external = len(df[df["Type"] == "External"])
+        broken = len(df[df["Status"] == "Broken"])
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total", total)
+        col2.metric("Internal", internal)
+        col3.metric("External", external)
+        col4.metric("Broken", broken)
+
+        st.markdown("---")
+
+        # -------- GRAPHS --------
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("Link Distribution")
+            fig1, ax1 = plt.subplots()
+            ax1.pie([internal, external], labels=["Internal", "External"], autopct='%1.1f%%')
+            st.pyplot(fig1)
+
+        with col2:
+            st.subheader("Status Overview")
+            fig2, ax2 = plt.subplots()
+            ax2.bar(["OK", "Broken"], [total - broken, broken])
+            st.pyplot(fig2)
+
+        st.markdown("---")
+
+        # -------- TABLES --------
+        tab1, tab2, tab3, tab4 = st.tabs(["All", "Internal", "External", "Broken"])
+
+        with tab1:
+            st.dataframe(df, use_container_width=True,
+                         column_config={"URL": st.column_config.LinkColumn("URL")})
+
+        with tab2:
+            st.dataframe(df[df["Type"] == "Internal"], use_container_width=True)
+
+        with tab3:
+            st.dataframe(df[df["Type"] == "External"], use_container_width=True)
+
+        with tab4:
+            st.dataframe(df[df["Status"] == "Broken"], use_container_width=True)
+
+        # -------- INTERNAL LINK INSIGHTS --------
+        st.markdown("---")
+        st.subheader("🔗 Internal Link Insights")
+
+        # ✅ USE INPUT URL ONLY (FIXED)
+        st.write(f"Analyzing internal links for: {url}")
+
+        interlinks = find_linking_pages_pro(url, url, limit=30)
+
+        if not interlinks.empty:
+
+            total_links = len(interlinks)
+            unique_pages = interlinks["Page Linking To Target"].nunique()
+
+            col1, col2 = st.columns(2)
+            col1.metric("Total Links Found", total_links)
+            col2.metric("Unique Pages Linking", unique_pages)
+
+            st.markdown("### 📊 Anchor Text Distribution")
+            st.dataframe(interlinks["Anchor Text"].value_counts())
+
+            st.markdown("### 📄 Linking Pages")
+            st.dataframe(interlinks, use_container_width=True)
+
+        else:
+            st.warning("No linking pages found (within scanned pages)")
+
+        # -------- DOWNLOAD --------
+        st.download_button(
+            "⬇ Download CSV",
+            df.to_csv(index=False),
+            "seo_report.csv"
+        )
